@@ -34,13 +34,15 @@ class AdaptiveContextMenuAction {
 /// On iOS 26+: Uses native UIContextMenu with Liquid Glass effects
 /// On iOS <26: Uses CupertinoContextMenu
 /// On Android: Uses PopupMenuButton with Material Design
-class AdaptiveContextMenu extends StatelessWidget {
+class AdaptiveContextMenu extends StatefulWidget {
   /// Creates an adaptive context menu
   const AdaptiveContextMenu({
     super.key,
     required this.child,
     required this.actions,
     this.previewBuilder,
+    this.onOpened,
+    this.onDismiss,
   });
 
   /// The widget to wrap with context menu
@@ -51,6 +53,68 @@ class AdaptiveContextMenu extends StatelessWidget {
 
   /// Optional preview builder for iOS (shows preview when long pressing)
   final Widget Function(BuildContext)? previewBuilder;
+
+  /// Callback when the context menu is fully opened
+  final VoidCallback? onOpened;
+
+  /// Callback when the context menu preview is dismissed
+  /// This is called when the menu is closed without selecting an action
+  final VoidCallback? onDismiss;
+
+  @override
+  State<AdaptiveContextMenu> createState() => _AdaptiveContextMenuState();
+}
+
+class _AdaptiveContextMenuState extends State<AdaptiveContextMenu> {
+  double _lastAnimationValue = 0.0;
+  bool _hasCalledOnOpened = false;
+  bool _hasCalledOnDismiss = true; // Start as true so we don't call onDismiss on initial build
+  bool _pendingOpenedCallback = false;
+  bool _pendingDismissCallback = false;
+
+  @override
+  void dispose() {
+    super.dispose();
+  }
+
+  void _onAnimationUpdate(double value) {
+    // Debug logging - remove after testing
+    debugPrint('Animation value: $value, lastValue: $_lastAnimationValue, hasCalledOnOpened: $_hasCalledOnOpened, hasCalledOnDismiss: $_hasCalledOnDismiss');
+    
+    // When animation reaches 1.0, the menu is fully opened
+    if (!_hasCalledOnOpened && !_pendingOpenedCallback && value >= 1.0 && widget.onOpened != null) {
+      _pendingOpenedCallback = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _pendingOpenedCallback) {
+          _pendingOpenedCallback = false;
+          _hasCalledOnOpened = true;
+          _hasCalledOnDismiss = false;
+          debugPrint('>>> Calling onOpened');
+          widget.onOpened!();
+        }
+      });
+    }
+    
+    // When animation returns to 0.0, the menu is dismissed
+    // IMPORTANT: Only trigger if we're seeing a natural transition (last value was between 0 and 1)
+    // This prevents false triggers when two different animations call the builder
+    // (route animation at 1.0 vs hidden widget animation reset to 0.0)
+    final bool isNaturalTransition = _lastAnimationValue > 0.0 && _lastAnimationValue < 1.0;
+    if (_hasCalledOnOpened && !_hasCalledOnDismiss && !_pendingDismissCallback && value == 0.0 && isNaturalTransition && widget.onDismiss != null) {
+      _pendingDismissCallback = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _pendingDismissCallback) {
+          _pendingDismissCallback = false;
+          _hasCalledOnDismiss = true;
+          _hasCalledOnOpened = false;
+          debugPrint('>>> Calling onDismiss');
+          widget.onDismiss!();
+        }
+      });
+    }
+    
+    _lastAnimationValue = value;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -71,7 +135,7 @@ class AdaptiveContextMenu extends StatelessWidget {
 
   Widget _buildCupertinoContextMenu(BuildContext context) {
     return CupertinoContextMenu.builder(
-      actions: actions.map((action) {
+      actions: widget.actions.map((action) {
         return CupertinoContextMenuAction(
           onPressed: () {
             Navigator.of(context, rootNavigator: true).pop();
@@ -85,7 +149,9 @@ class AdaptiveContextMenu extends StatelessWidget {
         );
       }).toList(),
       builder: (context, animation) {
-        return child;
+        // Track animation value to detect when menu opens
+        _onAnimationUpdate(animation.value);
+        return widget.child;
       },
     );
   }
@@ -95,7 +161,7 @@ class AdaptiveContextMenu extends StatelessWidget {
       onLongPress: () {
         _showAndroidMenu(context);
       },
-      child: child,
+      child: widget.child,
     );
   }
 
@@ -103,6 +169,15 @@ class AdaptiveContextMenu extends StatelessWidget {
     final RenderBox renderBox = context.findRenderObject() as RenderBox;
     final Offset offset = renderBox.localToGlobal(Offset.zero);
     final Size size = renderBox.size;
+
+    // Call onOpened callback when menu is shown
+    if (widget.onOpened != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          widget.onOpened!();
+        }
+      });
+    }
 
     showMenu<int>(
       context: context,
@@ -112,7 +187,7 @@ class AdaptiveContextMenu extends StatelessWidget {
         offset.dx + size.width,
         offset.dy,
       ),
-      items: actions.asMap().entries.map((entry) {
+      items: widget.actions.asMap().entries.map((entry) {
         final index = entry.key;
         final action = entry.value;
 
@@ -147,7 +222,10 @@ class AdaptiveContextMenu extends StatelessWidget {
       }).toList(),
     ).then((selectedIndex) {
       if (selectedIndex != null) {
-        actions[selectedIndex].onPressed();
+        widget.actions[selectedIndex].onPressed();
+      } else if (widget.onDismiss != null) {
+        // Menu was dismissed without selection
+        widget.onDismiss!();
       }
     });
   }
